@@ -10,7 +10,7 @@ desc: >
   失败时日志与回执只记录稳定错误码，不泄密；百度被拦截时引导配置 Cookies。
 version: 2.0.0
 author: kimyoung666
-repo: https://github.com/kimyoung666/astrbot_plugin_bing_search
+repo: https://github.com/kimyoung666/astrbot_all_search
 astrbot_version: ">=4.26.7"
 support_platforms:
   - aiocqhttp
