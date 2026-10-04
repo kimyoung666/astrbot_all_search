@@ -1,0 +1,164 @@
+{
+  "enabled": {
+    "description": "插件总开关",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后插件不响应任何搜索命令与工具调用。"
+  },
+  "enable_web_search": {
+    "description": "启用网页搜索",
+    "type": "bool",
+    "default": true,
+    "hint": "单独控制网页搜索工具与网页命令（/搜索、/search）。"
+  },
+  "enable_image_search": {
+    "description": "启用图片搜索",
+    "type": "bool",
+    "default": true,
+    "hint": "单独控制图片搜索工具与搜图命令（/搜图、/image）。"
+  },
+  "enable_bing": {
+    "description": "启用必应引擎",
+    "type": "bool",
+    "default": true,
+    "hint": "是否允许必应参与网页与图片搜索。"
+  },
+  "enable_baidu": {
+    "description": "启用百度引擎",
+    "type": "bool",
+    "default": true,
+    "hint": "是否允许百度参与网页与图片搜索；关闭后默认多引擎不会调用百度。"
+  },
+  "enable_bilibili": {
+    "description": "启用哔哩哔哩引擎",
+    "type": "bool",
+    "default": true,
+    "hint": "是否允许哔哩哔哩参与视频搜索（不支持图片搜索）。"
+  },
+  "bing_host": {
+    "description": "必应地址来源",
+    "type": "string",
+    "default": "cn.bing.com",
+    "hint": "必应搜索地址，默认 cn.bing.com；可填写不带协议的主机名。"
+  },
+  "baidu_host": {
+    "description": "百度地址来源",
+    "type": "string",
+    "default": "www.baidu.com",
+    "hint": "百度搜索地址，默认 www.baidu.com（桌面结果页）。"
+  },
+  "baidu_cookies": {
+    "description": "百度 Cookies",
+    "type": "string",
+    "default": "",
+    "hint": "可选，默认留空。被百度拦截（出现安全验证）时，从浏览器复制 baidu.com 的 Cookie 粘贴到此处，可显著提高成功率。百度能否搜索成功主要取决于服务器出口 IP。"
+  },
+  "bilibili_host": {
+    "description": "哔哩哔哩 API 地址",
+    "type": "string",
+    "default": "api.bilibili.com",
+    "hint": "哔哩哔哩搜索 API 主机名，一般无需修改。"
+  },
+  "bilibili_cookies": {
+    "description": "哔哩哔哩 Cookies",
+    "type": "string",
+    "default": "",
+    "hint": "可选，默认留空。哔哩哔哩搜索接口不带 Cookie 也能正常使用；填写（如含 buvid3）可提升稳定性。"
+  },
+  "merge_all_engines": {
+    "description": "不指定引擎时搜索全部引擎",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后 /搜索 <关键词> 会并发搜索所有已启用引擎并合并结果；关闭则仅使用下方「默认引擎」。"
+  },
+  "default_engine": {
+    "description": "默认引擎（仅当关闭全引擎合并时生效）",
+    "type": "string",
+    "default": "bing",
+    "hint": "取值 bing / baidu / bilibili。"
+  },
+  "merge_total_count": {
+    "description": "合并结果总条数",
+    "type": "int",
+    "default": 5,
+    "hint": "多引擎合并后进入 AI 上下文的结果总条数上限。",
+    "slider": {
+      "min": 1,
+      "max": 50,
+      "step": 1
+    }
+  },
+  "default_count": {
+    "description": "默认网页结果数",
+    "type": "int",
+    "default": 5,
+    "hint": "单引擎网页搜索未显式指定条数时返回的结果数量。",
+    "slider": {
+      "min": 1,
+      "max": 50,
+      "step": 1
+    }
+  },
+  "default_bilibili_count": {
+    "description": "默认哔哩哔哩视频数",
+    "type": "int",
+    "default": 5,
+    "hint": "哔哩哔哩搜索默认返回的视频条数。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    }
+  },
+  "default_image_count": {
+    "description": "默认转发图片数",
+    "type": "int",
+    "default": 3,
+    "hint": "未显式指定数量时转发的图片张数。",
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    }
+  },
+  "need_summary": {
+    "description": "返回搜索摘要 / 视频简介",
+    "type": "bool",
+    "default": true,
+    "hint": "是否在网页结果中展示摘要片段；哔哩哔哩结果对应视频简介。"
+  },
+  "need_content": {
+    "description": "请求完整网页正文",
+    "type": "bool",
+    "default": false,
+    "hint": "是否请求完整网页正文；建议保持关闭。本版本仅保留配置项，默认不抓取正文。"
+  },
+  "need_url": {
+    "description": "返回来源地址 / 视频直链",
+    "type": "bool",
+    "default": true,
+    "hint": "是否在结果中附带公开来源地址；哔哩哔哩结果对应视频直链。"
+  },
+  "timeout_seconds": {
+    "description": "单次请求超时（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "单次搜索请求的超时时间，安全范围 5-120 秒。",
+    "slider": {
+      "min": 5,
+      "max": 120,
+      "step": 1
+    }
+  },
+  "max_snippet_chars": {
+    "description": "每条结果最大字符数",
+    "type": "int",
+    "default": 1200,
+    "hint": "每条结果进入 AI 上下文时的最大字符数，范围 200-8000。",
+    "slider": {
+      "min": 200,
+      "max": 8000,
+      "step": 100
+    }
+  }
+}

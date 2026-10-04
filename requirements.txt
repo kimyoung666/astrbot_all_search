@@ -1,0 +1,2 @@
+# 本插件仅依赖 AstrBot 已内置的 aiohttp，无需额外安装任何第三方库。
+# This plugin only relies on aiohttp bundled with AstrBot; no extra packages needed.
