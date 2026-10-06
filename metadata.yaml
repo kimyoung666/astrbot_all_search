@@ -9,7 +9,7 @@ desc: >
   可在关键词前显式指定引擎（如 /搜索 百度 关键词）。网页与图片是两项独立能力，
   图片在工具调用期间由插件直接发送到当前会话，AI 只收到不含图片直链的文字回执。
   失败时日志与回执只记录稳定错误码，不泄密；百度被拦截时引导配置 Cookies。
-version: 2.0.0
+version: 2.0.1
 author: kimyoung666
 repo: https://github.com/kimyoung666/astrbot_all_search
 astrbot_version: ">=4.26.7"
