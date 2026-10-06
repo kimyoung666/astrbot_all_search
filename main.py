@@ -2,7 +2,7 @@
 
 - 网页搜索：在必应（cn.bing.com）、百度（www.baidu.com）、哔哩哔哩（api.bilibili.com）
   上搜索公开内容。不指定引擎时并发搜索全部已启用引擎并合并结果。
-- 图片搜索：支持必应与百度；哔哩哔哩不提供图片搜索，会明确提示不支持。
+- 图片搜索：支持必应、百度与哔哩哔哩；哔哩哔哩从视频封面与专栏图文配图获取。
 - 哔哩哔哩返回视频直链与视频简介（含 UP 主、播放量、时长等辅助信息）。
 
 设计要点：
@@ -17,6 +17,7 @@ import asyncio
 import html as _html
 import json
 import re
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 
@@ -132,6 +133,66 @@ def _normalize_url_for_dedupe(url: str) -> str:
         return ""
     u = url.strip().split("#", 1)[0]
     return u.rstrip("/").lower()
+
+
+# ---------------------------------------------------------------------------
+# 相关度打分（多引擎合并排序用；纯本地计算，不发请求）
+# ---------------------------------------------------------------------------
+
+_DEFAULT_W_TITLE = 3.0                       # 关键词命中标题的默认权重
+_DEFAULT_W_SNIPPET = 1.0                     # 关键词命中摘要的默认权重
+_PUNCT_ONLY_RE = re.compile(r"^[\W_]+$", re.UNICODE)  # 纯标点 / 下划线 token
+
+
+def _normalize_text(text: str) -> str:
+    """NFKC 归一化 + 小写：一次性统一全半角与大小写。"""
+    return unicodedata.normalize("NFKC", text or "").lower()
+
+
+def _tokenize(query: str) -> list[str]:
+    """把 query 切成用于命中的 token 列表。
+
+    - 先按空白切分（中文无空格时整串作为一个 token）；
+    - 若只有一个长 token（多为连续中文），追加相邻二字 bigram，
+      避免「整串精确匹配才得分」导致长中文 query 命中率过低；
+    - 丢弃纯标点 token。
+    """
+    norm = _normalize_text(query).strip()
+    if not norm:
+        return []
+    tokens = [t for t in _WS_RE.split(norm) if t and not _PUNCT_ONLY_RE.match(t)]
+    if len(tokens) == 1 and len(tokens[0]) > 2:
+        s = tokens[0]
+        tokens += [s[i : i + 2] for i in range(len(s) - 1)]
+    return tokens
+
+
+def _score_result(query: str, item, w_title: float, w_snippet: float) -> float:
+    """关键词命中打分：标题权重 > 摘要；覆盖率累加；命中越全分越高。
+
+    纯本地计算，不发起任何请求。query 为空或纯标点时返回 0.0，
+    使所有结果同分，从而退化为按引擎优先级稳定排序。
+    """
+    tokens = _tokenize(query)
+    if not tokens:
+        return 0.0
+    norm_q = _normalize_text(query).strip()
+    title = _normalize_text(getattr(item, "title", ""))
+    snippet = _normalize_text(getattr(item, "snippet", ""))
+    score = 0.0
+    title_hits = 0
+    for tk in tokens:
+        # 每个 token 在每个字段最多计 1 次，避免高频词刷分
+        if tk in title:
+            score += w_title
+            title_hits += 1
+        elif tk in snippet:                  # 标题已命中则不再重复加摘要分
+            score += w_snippet
+    if norm_q and title and title == norm_q:
+        score += 5.0                         # 标题完全等于 query
+    if title_hits == len(tokens):
+        score += 2.0                         # 全部 token 都命中标题
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +555,7 @@ class BilibiliEngine(BaseEngine):
 
     name = "bilibili"
     label = "哔哩哔哩"
-    supports_image = False
+    supports_image = True
 
     def __init__(self, host: str, timeout: int, cookies: str = ""):
         super().__init__(host, timeout)
@@ -624,6 +685,141 @@ class BilibiliEngine(BaseEngine):
             return [group]
         return []
 
+    # -- 图片搜索：视频封面 + 专栏图文配图 ---------------------------------
+
+    # B 站图片 CDN 域名白名单（//i0~i2.hdslb.com 等）
+    _IMG_HOST_RE = re.compile(r"^https://([a-z0-9-]+\.)?hdslb\.com/", re.I)
+
+    async def _search_raw(self, search_type: str, query: str) -> dict:
+        """请求一次 search/type 接口，返回 data 字典。
+
+        失败（风控返回 HTML、非 0 码、解析异常）统一返回空 dict，
+        由调用方静默降级，不影响另一类结果的返回。
+        """
+        params = {"search_type": search_type, "keyword": query, "page": "1"}
+        body = await self._fetch(
+            f"{self.base}/x/web-interface/search/type",
+            headers=self._headers(),
+            params=params,
+        )
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict) or data.get("code") != 0:
+            return {}
+        payload = data.get("data")
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _fix_url(cls, url) -> str:
+        """补全协议相对 URL 并做域名白名单校验。
+
+        - `//i2.hdslb.com/xxx.jpg` → `https://i2.hdslb.com/xxx.jpg`
+        - `http://...` → 强制 `https://`
+        - 非 `*.hdslb.com` 域名或空串 → 返回空（丢弃，避免外链噪声）
+        """
+        if not isinstance(url, str):
+            return ""
+        u = url.strip()
+        if not u:
+            return ""
+        if u.startswith("//"):
+            u = "https:" + u
+        elif u.startswith("http://"):
+            u = "https://" + u[len("http://"):]
+        if not cls._IMG_HOST_RE.match(u):
+            return ""
+        return u
+
+    def _collect_images(self, data: dict, kind: str) -> list[tuple[str, str, dict]]:
+        """从单类响应中抽取 (图片URL, 标题, extra) 三元组。
+
+        - video：`result[].pic` 为单张封面。
+        - article：`result[].image_urls` 为图片数组（专栏图文含多张配图）。
+        """
+        out: list[tuple[str, str, dict]] = []
+        groups = data.get("result") or []
+        if kind == "video":
+            items = self._extract_video_items(groups)
+        else:
+            items = groups if isinstance(groups, list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = _strip_tags(str(item.get("title", "")))
+            meta = {
+                "author": item.get("author") or item.get("uname", ""),
+                "pubdate": item.get("pubdate", ""),
+                "kind": kind,
+            }
+            if kind == "video":
+                u = self._fix_url(item.get("pic", ""))
+                if u:
+                    out.append((u, title, meta))
+            else:
+                url_list = item.get("image_urls") or []
+                if isinstance(url_list, list):
+                    for raw in url_list:
+                        u = self._fix_url(raw)
+                        if u:
+                            out.append((u, title, meta))
+        return out
+
+    async def search_images(self, query: str, count: int) -> list[SearchResult]:
+        """图片搜索：并发取视频封面与专栏图文配图，交错汇总去重。
+
+        - 复用 `_warmup()` 获取 buvid3 等设备指纹 Cookie，降低风控概率。
+        - 两类请求各自静默降级：其一失败（风控/解析失败）时另一类照常返回。
+        - 两类的图片 URL 补全为 https 并去重后，按 count 截断。
+        """
+        await self._warmup()
+
+        async def _safe_search(search_type: str) -> dict:
+            try:
+                return await self._search_raw(search_type, query)
+            except Exception:  # noqa: BLE001 —— 单类失败不阻断另一类
+                return {}
+
+        video_data, article_data = await asyncio.gather(
+            _safe_search("video"),
+            _safe_search("article"),
+        )
+        buckets = [
+            self._collect_images(video_data, "video"),
+            self._collect_images(article_data, "article"),
+        ]
+
+        # 交错取材：video, article, video, article…… 保证两类都有机会入选
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        idx = 0
+        while len(results) < count and any(idx < len(b) for b in buckets):
+            progressed = False
+            for bucket in buckets:
+                if idx < len(bucket):
+                    progressed = True
+                    u, title, meta = bucket[idx]
+                    key = u.lower()
+                    if key in seen:          # 跨类去重（封面可能与配图重复）
+                        continue
+                    seen.add(key)
+                    results.append(
+                        SearchResult(
+                            title=title,
+                            url=u,
+                            snippet="",
+                            source=self.name,
+                            extra=meta,
+                        )
+                    )
+                    if len(results) >= count:
+                        break
+            if not progressed:
+                break
+            idx += 1
+        return results
+
 
 _ENGINE_CLASSES = {
     "bing": BingEngine,
@@ -663,6 +859,22 @@ class BingSearchPlugin(Star):
 
     def _merge_total_count(self) -> int:
         return _clamp(self._cfg("merge_total_count", 5), 1, 50, 5)
+
+    def _relevance_sort_enabled(self) -> bool:
+        """是否按相关度排序（关闭则退化为按引擎优先级排序）。"""
+        return bool(self._cfg("enable_relevance_sort", True))
+
+    def _weight(self, key: str, default: float) -> float:
+        """读取浮点权重，异常或越界时回退默认值，限定在 [0, 10]。"""
+        try:
+            v = float(self._cfg(key, default))
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(10.0, v))
+
+    def _engine_rank(self) -> dict:
+        """引擎优先级：数值越小越靠前（必应 > 百度 > 哔哩哔哩）。"""
+        return {e: i for i, e in enumerate(_ENGINE_ORDER)}
 
     def _default_image_count(self) -> int:
         return _clamp(self._cfg("default_image_count", 3), 1, 5, 3)
@@ -779,11 +991,12 @@ class BingSearchPlugin(Star):
     async def _run_web(self, engines: list[str], query: str, freshness: str = "") -> tuple[dict, list]:
         """并发执行多引擎网页搜索。
 
-        返回 (每引擎明细 {engine: (code, results)}, 合并去重并截断后的结果列表)。
+        返回 (每引擎明细 {engine: (code, results)}, 合并去重排序并截断后的结果列表)。
 
-        多引擎合并时采用**轮转（round-robin）**取样：先各引擎取第 1 条，
-        再各取第 2 条……这样各引擎结果都能出现在有限的总条数里，
-        不会因为第一个引擎条数多就把其他引擎挤掉。
+        合并策略：先收集三个引擎的全部结果并按 URL 去重，再**按相关度从高到低**排序，
+        最后截断到 merge_total_count。相关度由关键词命中打分决定（标题权重高于摘要）；
+        同分时按引擎优先级（必应 > 百度 > 哔哩哔哩）稳定排序，保证输出确定不抖动。
+        关闭 enable_relevance_sort 时权重置 0，退化为按引擎优先级排序。
         """
         tasks = [self._fetch_web(e, query, self._count_for(e), freshness) for e in engines]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
@@ -798,29 +1011,30 @@ class BingSearchPlugin(Star):
             code, results = item
             details[name] = (code, results)
 
-        # 轮转合并 + 按 URL 去重
-        merged: list[SearchResult] = []
-        seen: set[str] = set()
+        # 1) 收集全部结果（按引擎优先级遍历，保证同分稳定）+ 按 URL 去重
         limit = self._merge_total_count()
-        buckets = [list(details.get(n, ("", []))[1]) for n in ordered]
-        idx = 0
-        while len(merged) < limit and any(buckets):
-            progressed = False
-            for bucket in buckets:
-                if idx < len(bucket):
-                    progressed = True
-                    r = bucket[idx]
-                    key = _normalize_url_for_dedupe(r.url)
-                    if key and key in seen:
-                        continue
-                    if key:
-                        seen.add(key)
-                    merged.append(r)
-                    if len(merged) >= limit:
-                        break
-            if not progressed:
-                break
-            idx += 1
+        engine_rank = self._engine_rank()
+        use_relevance = self._relevance_sort_enabled()
+        w_title = self._weight("weight_title", _DEFAULT_W_TITLE) if use_relevance else 0.0
+        w_snippet = self._weight("weight_snippet", _DEFAULT_W_SNIPPET) if use_relevance else 0.0
+        collected: list[tuple[float, int, int, SearchResult]] = []
+        seen: set[str] = set()
+        seq = 0
+        for name in ordered:
+            for r in details.get(name, ("", []))[1]:
+                key = _normalize_url_for_dedupe(r.url)
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                # 关闭相关度排序时分数恒为 0，退化为按引擎优先级排序
+                score = _score_result(query, r, w_title, w_snippet) if use_relevance else 0.0
+                collected.append((score, engine_rank.get(r.source, 99), seq, r))
+                seq += 1
+
+        # 2) 排序：分数降序 → 引擎优先级升序 → 收集顺序升序；3) 截断
+        collected.sort(key=lambda t: (-t[0], t[1], t[2]))
+        merged: list[SearchResult] = [t[3] for t in collected][:limit]
         return details, merged
 
     async def _run_images(self, engines: list[str], query: str) -> tuple[dict, list]:
@@ -920,7 +1134,7 @@ class BingSearchPlugin(Star):
                 "触发风控限流，请稍后重试；或在 WebUI 填写「哔哩哔哩 Cookies」"
                 "（建议包含 buvid3）以提升稳定性。"
             ),
-            E_IMG_UNSUPPORTED: "该引擎不支持图片搜索，请改用 bing 或 baidu。",
+            E_IMG_UNSUPPORTED: "该引擎不支持图片搜索，请改用 bing、baidu 或 bilibili。",
             E_ENGINE_DISABLED: "该引擎已在插件配置中关闭。",
             E_UNKNOWN_ENGINE: "无法识别的搜索引擎。",
             E_ALL_FAILED: "所有搜索引擎均未返回结果。",
@@ -987,7 +1201,7 @@ class BingSearchPlugin(Star):
         return [self._default_engine()], ""
 
     def _want_engines_image(self, requested: list[str]) -> tuple[list[str], str]:
-        """图片搜索：哔哩哔哩不支持；默认只用支持图片的引擎。"""
+        """图片搜索：默认选取所有支持图片的已启用引擎（必应/百度/哔哩哔哩）。"""
         if requested:
             for name in requested:
                 if not _ENGINE_CLASSES[name].supports_image:
@@ -1067,7 +1281,7 @@ class BingSearchPlugin(Star):
         if not query:
             yield event.plain_result(
                 "用法：/搜图 [搜索引擎] <关键词>\n"
-                "搜索引擎可选：bing/必应、百度/bd；哔哩哔哩不支持图片搜索。"
+                "搜索引擎可选：bing/必应、百度/bd、bilibili/b站；留空则搜索全部支持图片的引擎。"
             )
             return
         engines, code = self._want_engines_image(requested)
@@ -1227,17 +1441,18 @@ class BingSearchPlugin(Star):
     @filter.llm_tool(name="image_search_bing")
     async def image_search_bing(self, event: AstrMessageEvent, query: str, count: int = 0,
                                 engine: str = ""):
-        """在搜索引擎（必应/百度）搜索图片，并在本次工具调用期间直接把 1-5 张图片发送到当前对话。
+        """在搜索引擎（必应/百度/哔哩哔哩）搜索图片，并在本次工具调用期间直接把 1-5 张图片发送到当前对话。
 
         图片由插件直接发送给用户，调用方只会收到不含图片直链的文字回执
         （包含成功与失败的数量），无需也不能再次转发图片。
-        哔哩哔哩不支持图片搜索。
+        哔哩哔哩的图片来自视频封面与专栏图文配图。
 
         Args:
             query(string): 搜索关键词，必填。
             count(number): 需要发送的图片数量，可选，1-5，默认使用插件配置值。
-            engine(string): 指定搜索引擎，可选，取值 bing / baidu 或其别名（必应、百度、bd）；
-                留空表示使用全部支持图片搜索的已启用引擎。哔哩哔哩不支持图片搜索。
+            engine(string): 指定搜索引擎，可选，取值 bing / baidu / bilibili 或其别名
+                （必应、百度、bd、b站、bili、哔哩哔哩）；
+                留空表示使用全部支持图片搜索的已启用引擎。
         """
         async for r in self._tool_image(event, query, count, engine):
             yield r
@@ -1245,12 +1460,12 @@ class BingSearchPlugin(Star):
     @filter.llm_tool(name="image_search")
     async def image_search(self, event: AstrMessageEvent, query: str, count: int = 0,
                            engine: str = ""):
-        """在搜索引擎（必应/百度）搜索图片，并在本次工具调用期间直接把 1-5 张图片发送到当前对话。
+        """在搜索引擎（必应/百度/哔哩哔哩）搜索图片，并在本次工具调用期间直接把 1-5 张图片发送到当前对话。
 
         Args:
             query(string): 搜索关键词，必填。
             count(number): 需要发送的图片数量，可选，1-5，默认使用插件配置值。
-            engine(string): 指定搜索引擎，可选，取值 bing / baidu 或其别名；留空表示全部支持图片的引擎。
+            engine(string): 指定搜索引擎，可选，取值 bing / baidu / bilibili 或其别名；留空表示全部支持图片的引擎。
         """
         async for r in self._tool_image(event, query, count, engine):
             yield r
